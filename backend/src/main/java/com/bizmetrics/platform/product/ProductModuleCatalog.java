@@ -1,0 +1,100 @@
+package com.bizmetrics.platform.product;
+
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Set;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+/**
+ * Defines the capabilities exposed by BizMetrics. The focused internal module keeps
+ * expense control and company access management in the core;
+ * people, workforce, tax, policy, household, and backup capabilities remain
+ * independently gated.
+ */
+@Component
+public class ProductModuleCatalog {
+    private static final Set<String> CORE_MODULES = Set.of(
+        "workspace",
+        "approvals",
+        "operations",
+        "transactions",
+        "budgets",
+        "reports",
+        "recurring",
+        "finance",
+        "accounts",
+        "evidence",
+        "access-management",
+        "settings"
+    );
+
+    private final String mode;
+    private final boolean householdEnabled;
+    private final boolean peopleCoreEnabled;
+    private final boolean workforceCostEnabled;
+    private final boolean talentSuiteEnabled;
+    private final boolean taxWorkspaceEnabled;
+    private final boolean policyCenterEnabled;
+    private final boolean backupUiEnabled;
+
+    public ProductModuleCatalog(
+        @Value("${bizmetrics.product.mode:internal-module}") String mode,
+        @Value("${bizmetrics.product.modules.household-enabled:false}") boolean householdEnabled,
+        @Value("${bizmetrics.product.modules.people-core-enabled:false}") boolean peopleCoreEnabled,
+        @Value("${bizmetrics.product.modules.workforce-cost-enabled:false}") boolean workforceCostEnabled,
+        @Value("${bizmetrics.product.modules.talent-suite-enabled:false}") boolean talentSuiteEnabled,
+        @Value("${bizmetrics.product.modules.tax-workspace-enabled:false}") boolean taxWorkspaceEnabled,
+        @Value("${bizmetrics.product.modules.policy-center-enabled:false}") boolean policyCenterEnabled,
+        @Value("${bizmetrics.product.modules.backup-ui-enabled:false}") boolean backupUiEnabled
+    ) {
+        this.mode = mode == null || mode.isBlank() ? "internal-module" : mode.trim();
+        this.householdEnabled = householdEnabled;
+        this.peopleCoreEnabled = peopleCoreEnabled;
+        this.workforceCostEnabled = workforceCostEnabled;
+        this.talentSuiteEnabled = talentSuiteEnabled;
+        this.taxWorkspaceEnabled = taxWorkspaceEnabled;
+        this.policyCenterEnabled = policyCenterEnabled;
+        this.backupUiEnabled = backupUiEnabled;
+    }
+
+    public ProductModules snapshot() {
+        LinkedHashSet<String> enabled = new LinkedHashSet<>(CORE_MODULES);
+        if (householdEnabled) {
+            enabled.add("household");
+        }
+        if (peopleCoreEnabled) {
+            enabled.add("people-core");
+        }
+        if (workforceCostEnabled) {
+            enabled.add("workforce-cost");
+        }
+        if (talentSuiteEnabled) {
+            enabled.add("talent-suite");
+        }
+        if (taxWorkspaceEnabled) {
+            enabled.add("tax");
+        }
+        if (policyCenterEnabled) {
+            enabled.add("policy");
+        }
+        if (backupUiEnabled) {
+            enabled.add("backup");
+        }
+        return new ProductModules(mode, Collections.unmodifiableSet(enabled));
+    }
+
+    public boolean householdEnabled() {
+        return householdEnabled;
+    }
+
+    public boolean isEnabled(String module) {
+        return snapshot().isEnabled(module);
+    }
+
+    public record ProductModules(String mode, Set<String> enabled) {
+        public boolean isEnabled(String module) {
+            return enabled.contains(module);
+        }
+    }
+}
