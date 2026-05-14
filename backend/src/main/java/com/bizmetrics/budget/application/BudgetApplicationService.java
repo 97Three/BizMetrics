@@ -1,0 +1,280 @@
+package com.bizmetrics.budget.application;
+
+import com.bizmetrics.budget.api.BudgetCreateRequest;
+import com.bizmetrics.budget.api.BudgetUpdateRequest;
+import com.bizmetrics.budget.domain.Budget;
+import com.bizmetrics.budget.domain.BudgetPolicy;
+import com.bizmetrics.budget.domain.BudgetReservation;
+import com.bizmetrics.budget.domain.BudgetReservationCommand;
+import com.bizmetrics.budget.infrastructure.BudgetReservationRepository;
+import com.bizmetrics.common.PageRequest;
+import com.bizmetrics.common.PagedResponse;
+import com.bizmetrics.platform.tenant.Company;
+import com.bizmetrics.operations.domain.TransactionRecord;
+import com.bizmetrics.platform.access.AccessContextService;
+import com.bizmetrics.platform.identity.ActorContext;
+import com.bizmetrics.platform.audit.application.AuditTrailService;
+import com.bizmetrics.service.OutboxEventService;
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+
+@Service
+public class BudgetApplicationService {
+    private final BudgetRepository repository;
+    private final BudgetReservationRepository reservationRepository;
+    private final BudgetPolicy policy;
+    private final AccessContextService accessContext;
+    private final AuditTrailService auditTrail;
+    private final OutboxEventService outbox;
+
+    public BudgetApplicationService(
+        BudgetRepository repository,
+        BudgetReservationRepository reservationRepository,
+        BudgetPolicy policy,
+        AccessContextService accessContext,
+        AuditTrailService auditTrail,
+        OutboxEventService outbox
+    ) {
+        this.repository = repository;
+        this.reservationRepository = reservationRepository;
+        this.policy = policy;
+        this.accessContext = accessContext;
+        this.auditTrail = auditTrail;
+        this.outbox = outbox;
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public PagedResponse<Budget> list(
+        ActorContext actor,
+        Long companyId,
+        Integer status,
+        LocalDate startDate,
+        LocalDate endDate,
+        String keyword,
+        int page,
+        int size
+    ) {
+        Company company = readableCompany(actor, companyId);
+        boolean companyWide = companyWideScope(accessContext.resolve(actor, company.id).scope());
+        String normalizedKeyword = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
+        List<Budget> budgets = repository.findByCompany(company.id).stream()
+            .filter(budget -> companyWide || budget.userId == actor.userId())
+            .filter(budget -> status == null || budget.status == status)
+            .filter(budget -> startDate == null || !LocalDate.parse(budget.endDate).isBefore(startDate))
+            .filter(budget -> endDate == null || !LocalDate.parse(budget.startDate).isAfter(endDate))
+            .filter(budget -> normalizedKeyword.isBlank()
+                || budget.name.toLowerCase(Locale.ROOT).contains(normalizedKeyword)
+                || (budget.categoryName != null && budget.categoryName.toLowerCase(Locale.ROOT).contains(normalizedKeyword)))
+            .toList();
+        return PagedResponse.of(budgets, new PageRequest(page, size));
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public List<Budget> active(ActorContext actor, Long companyId) {
+        Company company = readableCompany(actor, companyId);
+        boolean companyWide = companyWideScope(accessContext.resolve(actor, company.id).scope());
+        return repository.findByCompany(company.id).stream()
+            .filter(budget -> companyWide || budget.userId == actor.userId())
+            .filter(budget -> budget.status == 1)
+            .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public Budget get(ActorContext actor, long id, Long companyId) {
+        Company company = readableCompany(actor, companyId);
+        boolean companyWide = companyWideScope(accessContext.resolve(actor, company.id).scope());
+        return repository.findById(company.id, id)
+            .filter(budget -> companyWide || budget.userId == actor.userId())
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Budget not found"));
+    }
+
+    @Transactional
+    public Budget create(ActorContext actor, BudgetCreateRequest request) {
+        Company company = writableCompany(actor, request.companyId());
+        validatePeriod(request.startDate(), request.endDate());
+        validateCategory(company.id, request.categoryId());
+        String now = now();
+        Budget budget = new Budget();
+        budget.companyId = company.id;
+        budget.userId = actor.userId();
+        budget.ledgerId = null;
+        budget.categoryId = request.categoryId();
+        budget.name = request.name().trim();
+        budget.amount = request.amount();
+        budget.startDate = request.startDate().toString();
+        budget.endDate = request.endDate().toString();
+        budget.warningThreshold = request.warningThreshold() == null ? 85 : request.warningThreshold();
+        budget.status = 1;
+        budget.spent = BigDecimal.ZERO;
+        budget.createdAt = now;
+        budget.updatedAt = now;
+        policy.apply(budget);
+        repository.insert(budget);
+        refreshCompany(company.id);
+        Budget created = repository.findById(company.id, budget.id).orElse(budget);
+        audit(company.id, created, "create", "创建经营预算: " + created.name, actor);
+        return created;
+    }
+
+    @Transactional
+    public Budget update(ActorContext actor, long id, Long companyId, BudgetUpdateRequest request) {
+        Budget budget = repository.findByIdForUpdate(id)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Budget not found"));
+        Company company = writableCompany(actor, companyId == null ? budget.companyId : companyId);
+        if (budget.companyId == null || company.id != budget.companyId) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Budget belongs to another company");
+        }
+        requireBudgetOwnerOrCompanyScope(actor, company.id, budget);
+        if (request.version() != budget.version) {
+            throw new OptimisticLockingFailureException("Budget was changed by another request: " + budget.id);
+        }
+        if (request.name() != null) budget.name = request.name().trim();
+        if (request.amount() != null) budget.amount = request.amount();
+        if (request.startDate() != null) budget.startDate = request.startDate().toString();
+        if (request.endDate() != null) budget.endDate = request.endDate().toString();
+        if (request.warningThreshold() != null) budget.warningThreshold = request.warningThreshold();
+        if (Boolean.TRUE.equals(request.clearCategory())) {
+            budget.categoryId = null;
+        } else if (request.categoryId() != null) {
+            budget.categoryId = request.categoryId();
+        }
+        if (request.status() != null) budget.status = request.status();
+        validatePeriod(LocalDate.parse(budget.startDate), LocalDate.parse(budget.endDate));
+        validateCategory(company.id, budget.categoryId);
+        budget.updatedAt = now();
+        repository.update(policy.apply(budget));
+        refreshCompany(company.id);
+        Budget updated = repository.findById(company.id, id).orElse(budget);
+        audit(company.id, updated, "update", "更新经营预算: " + updated.name, actor);
+        return updated;
+    }
+
+    @Transactional
+    public void delete(ActorContext actor, long id, Long companyId) {
+        Budget budget = repository.findByIdForUpdate(id)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Budget not found"));
+        Company company = writableCompany(actor, companyId == null ? budget.companyId : companyId);
+        if (budget.companyId == null || company.id != budget.companyId) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Budget belongs to another company");
+        }
+        requireBudgetOwnerOrCompanyScope(actor, company.id, budget);
+        if (repository.hasTransactions(id)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Budget has transactions");
+        }
+        repository.delete(id);
+        audit(company.id, budget, "delete", "删除经营预算: " + budget.name, actor);
+    }
+
+    public Optional<Long> matchingBudgetId(TransactionRecord transaction) {
+        return repository.matchingBudgetId(transaction);
+    }
+
+    @Transactional
+    public Optional<BudgetReservation> reserveExpense(BudgetReservationCommand command) {
+        return reservationRepository.reserveMatching(command);
+    }
+
+    @Transactional
+    public BudgetReservation confirmReservation(long reservationId, long transactionId) {
+        return reservationRepository.confirm(reservationId, transactionId);
+    }
+
+    @Transactional
+    public BudgetReservation releaseReservation(long reservationId, String reason) {
+        return reservationRepository.release(reservationId, reason);
+    }
+
+    @Transactional
+    public Optional<BudgetReservation> releaseTransactionReservation(long transactionId, String reason) {
+        return reservationRepository.releaseByTransaction(transactionId, reason);
+    }
+
+    public void refreshCompany(long companyId) {
+        List<Budget> budgets = repository.findByCompany(companyId);
+        String now = now();
+        budgets.forEach(budget -> {
+            budget.updatedAt = now;
+            repository.persistProjection(budget);
+        });
+    }
+
+    public List<Budget> companyBudgets(long companyId) {
+        return repository.findByCompany(companyId);
+    }
+
+    private Company readableCompany(ActorContext actor, Long companyId) {
+        Company company = accessContext.requireCompany(actor, companyId);
+        requireAnyPermission(actor, company.id, "budget.manage", "operations.read", "reports.read");
+        return company;
+    }
+
+    private Company writableCompany(ActorContext actor, Long companyId) {
+        Company company = accessContext.requireCompany(actor, companyId);
+        accessContext.requirePermission(actor, company.id, "budget.manage");
+        return company;
+    }
+
+    private void requireAnyPermission(ActorContext actor, long companyId, String... permissions) {
+        var context = accessContext.resolve(actor, companyId);
+        for (String permission : permissions) {
+            if (context.permissions().contains(permission)) return;
+        }
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Budget read permission required");
+    }
+
+    private void requireBudgetOwnerOrCompanyScope(ActorContext actor, long companyId, Budget budget) {
+        String scope = accessContext.resolve(actor, companyId).scope();
+        if (!companyWideScope(scope) && budget.userId != actor.userId()) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Budget is outside the actor data scope");
+        }
+    }
+
+    private boolean companyWideScope(String scope) {
+        return Set.of("group", "company", "company_set", "readonly").contains(scope);
+    }
+
+    private void validateCategory(long companyId, Long categoryId) {
+        if (categoryId == null) return;
+        var category = repository.category(categoryId)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Valid categoryId is required"));
+        if (category.companyId() == null || category.companyId() != companyId) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Budget category belongs to another company");
+        }
+        if (!"expense".equals(category.type())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Budget category must be an expense category");
+        }
+    }
+
+    private void validatePeriod(LocalDate startDate, LocalDate endDate) {
+        if (endDate.isBefore(startDate)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "endDate must not be before startDate");
+        }
+    }
+
+    private String now() {
+        return OffsetDateTime.now().toString();
+    }
+
+    private void audit(long companyId, Budget budget, String action, String summary, ActorContext actor) {
+        auditTrail.record(companyId, "budget", budget.id, action, summary, actor.userId(), actor.user().nickname);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("summary", summary);
+        payload.put("budgetName", budget.name);
+        payload.put("amount", budget.amount);
+        payload.put("action", action);
+        outbox.publish("budget." + action, companyId, "budget", budget.id, actor.userId(), payload);
+    }
+}
