@@ -1,0 +1,32 @@
+package com.bizmetrics.service.support;
+
+import com.bizmetrics.notification.domain.OutboxEvent;
+import com.bizmetrics.service.NotificationService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+@Service
+public class LoggingOutboxEventHandler implements OutboxEventHandler {
+    private static final Logger log = LoggerFactory.getLogger(LoggingOutboxEventHandler.class);
+    private final NotificationService notificationService;
+
+    public LoggingOutboxEventHandler(NotificationService notificationService) {
+        this.notificationService = notificationService;
+    }
+
+    @Override
+    public void handle(OutboxEvent event) {
+        notificationService.handleOutboxEvent(event);
+        log.info(
+            "Processed outbox event id={} eventId={} type={} aggregate={}:{} companyId={} actorUserId={}",
+            event.id,
+            event.eventId,
+            event.eventType,
+            event.aggregateType,
+            event.aggregateId,
+            event.companyId,
+            event.actorUserId
+        );
+    }
+}
