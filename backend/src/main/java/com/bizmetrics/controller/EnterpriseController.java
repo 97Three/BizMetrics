@@ -1,0 +1,138 @@
+package com.bizmetrics.controller;
+
+import com.bizmetrics.platform.tenant.Company;
+import com.bizmetrics.people.domain.Employee;
+import com.bizmetrics.people.domain.EmploymentEvent;
+import com.bizmetrics.platform.tenant.EntityTransfer;
+import com.bizmetrics.platform.product.RequiresProductModule;
+import com.bizmetrics.service.EnterpriseManagementService;
+import com.bizmetrics.service.TaxComplianceService;
+import java.util.List;
+import java.util.Map;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/v1/enterprise")
+public class EnterpriseController {
+    private final EnterpriseManagementService service;
+    private final TaxComplianceService taxComplianceService;
+
+    public EnterpriseController(EnterpriseManagementService service, TaxComplianceService taxComplianceService) {
+        this.service = service;
+        this.taxComplianceService = taxComplianceService;
+    }
+
+    @GetMapping("/summary")
+    @RequiresProductModule("people-core")
+    public Map<String, Object> summary(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestParam(value = "companyId", required = false) Long companyId
+    ) {
+        return service.summary(authorization, companyId);
+    }
+
+    @GetMapping("/permission-matrix")
+    public Map<String, Object> permissionMatrix(@RequestHeader(value = "Authorization", required = false) String authorization) {
+        return service.permissionMatrix(authorization);
+    }
+
+    @GetMapping("/companies")
+    public List<Company> companies(@RequestHeader(value = "Authorization", required = false) String authorization) {
+        return service.listCompanies(authorization);
+    }
+
+    @PostMapping("/companies")
+    public Company createCompany(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestBody Map<String, Object> body
+    ) {
+        return service.createCompany(authorization, body);
+    }
+
+    @GetMapping("/company")
+    public Company company(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestParam(value = "companyId", required = false) Long companyId
+    ) {
+        return service.companyProfile(authorization, companyId);
+    }
+
+    @PutMapping("/company")
+    public Company updateCompany(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestParam(value = "companyId", required = false) Long companyId,
+        @RequestBody Map<String, Object> body
+    ) {
+        return service.updateCompanyProfile(authorization, companyId, body);
+    }
+
+    @GetMapping("/employees")
+    @RequiresProductModule("people-core")
+    public List<Employee> employees(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestParam Map<String, String> params
+    ) {
+        return service.listEmployees(authorization, params);
+    }
+
+    @PostMapping("/employees")
+    @RequiresProductModule("people-core")
+    public Employee createEmployee(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestBody Map<String, Object> body
+    ) {
+        return service.createEmployee(authorization, body);
+    }
+
+    @PutMapping("/employees/{id}")
+    @RequiresProductModule("people-core")
+    public Employee updateEmployee(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @PathVariable long id,
+        @RequestBody Map<String, Object> body
+    ) {
+        return service.updateEmployee(authorization, id, body);
+    }
+
+    @GetMapping("/employment-events")
+    @RequiresProductModule("people-core")
+    public List<EmploymentEvent> employmentEvents(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestParam(value = "companyId", required = false) Long companyId
+    ) {
+        return service.listEmploymentEvents(authorization, companyId);
+    }
+
+    @GetMapping("/tax-compliance")
+    @RequiresProductModule("tax")
+    public Map<String, Object> taxCompliance(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestParam(value = "companyId", required = false) Long companyId
+    ) {
+        return taxComplianceService.report(authorization, companyId);
+    }
+
+    @GetMapping("/entity-transfers")
+    public List<EntityTransfer> entityTransfers(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestParam(value = "entityId", required = false) Long entityId
+    ) {
+        return service.listEntityTransfers(authorization, entityId);
+    }
+
+    @PostMapping("/entity-transfers")
+    public EntityTransfer createEntityTransfer(
+        @RequestHeader(value = "Authorization", required = false) String authorization,
+        @RequestBody Map<String, Object> body
+    ) {
+        return service.createEntityTransfer(authorization, body);
+    }
+}
