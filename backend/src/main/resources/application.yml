@@ -1,0 +1,162 @@
+server:
+  port: 38080
+  shutdown: graceful
+  tomcat:
+    connection-timeout: ${BIZMETRICS_HTTP_CONNECTION_TIMEOUT:5s}
+    keep-alive-timeout: ${BIZMETRICS_HTTP_KEEP_ALIVE_TIMEOUT:20s}
+    max-keep-alive-requests: ${BIZMETRICS_HTTP_MAX_KEEP_ALIVE_REQUESTS:100}
+    max-connections: ${BIZMETRICS_HTTP_MAX_CONNECTIONS:4096}
+    accept-count: ${BIZMETRICS_HTTP_ACCEPT_COUNT:100}
+    threads:
+      max: ${BIZMETRICS_HTTP_MAX_THREADS:100}
+      min-spare: ${BIZMETRICS_HTTP_MIN_SPARE_THREADS:10}
+  compression:
+    enabled: true
+    min-response-size: 1KB
+    mime-types: application/json,text/plain,text/html,text/css,application/javascript
+
+debug: false
+
+spring:
+  application:
+    name: bizmetrics-backend
+  lifecycle:
+    timeout-per-shutdown-phase: ${BIZMETRICS_SHUTDOWN_TIMEOUT:30s}
+  datasource:
+    url: ${BIZMETRICS_DATASOURCE_URL:jdbc:postgresql://localhost:5432/bizmetrics}
+    username: ${BIZMETRICS_DATASOURCE_USERNAME:bizmetrics}
+    password: ${BIZMETRICS_DATASOURCE_PASSWORD:bizmetrics}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: ${BIZMETRICS_DB_POOL_MAX_SIZE:10}
+      minimum-idle: ${BIZMETRICS_DB_POOL_MIN_IDLE:2}
+      connection-timeout: ${BIZMETRICS_DB_POOL_CONNECTION_TIMEOUT_MS:5000}
+      validation-timeout: ${BIZMETRICS_DB_POOL_VALIDATION_TIMEOUT_MS:2000}
+      idle-timeout: ${BIZMETRICS_DB_POOL_IDLE_TIMEOUT_MS:600000}
+      max-lifetime: ${BIZMETRICS_DB_POOL_MAX_LIFETIME_MS:1800000}
+      keepalive-time: ${BIZMETRICS_DB_POOL_KEEPALIVE_MS:120000}
+      leak-detection-threshold: ${BIZMETRICS_DB_POOL_LEAK_DETECTION_MS:0}
+      initialization-fail-timeout: 30000
+      data-source-properties:
+        connectTimeout: ${BIZMETRICS_DB_CONNECT_TIMEOUT_SECONDS:5}
+        socketTimeout: ${BIZMETRICS_DB_SOCKET_TIMEOUT_SECONDS:30}
+        tcpKeepAlive: true
+        ApplicationName: bizmetrics-backend
+  flyway:
+    enabled: ${BIZMETRICS_FLYWAY_ENABLED:true}
+    baseline-on-migrate: true
+    baseline-version: 0
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 90MB
+
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+bizmetrics:
+  product:
+    mode: ${BIZMETRICS_PRODUCT_MODE:internal-module}
+    modules:
+      household-enabled: ${BIZMETRICS_MODULE_HOUSEHOLD_ENABLED:false}
+      people-core-enabled: ${BIZMETRICS_MODULE_PEOPLE_CORE_ENABLED:false}
+      workforce-cost-enabled: ${BIZMETRICS_MODULE_WORKFORCE_COST_ENABLED:false}
+      talent-suite-enabled: ${BIZMETRICS_MODULE_TALENT_SUITE_ENABLED:false}
+      tax-workspace-enabled: ${BIZMETRICS_MODULE_TAX_WORKSPACE_ENABLED:false}
+      policy-center-enabled: ${BIZMETRICS_MODULE_POLICY_CENTER_ENABLED:false}
+      backup-ui-enabled: ${BIZMETRICS_MODULE_BACKUP_UI_ENABLED:false}
+  runtime:
+    environment: ${BIZMETRICS_RUNTIME_ENVIRONMENT:local}
+  bootstrap:
+    mode: ${BIZMETRICS_BOOTSTRAP_MODE:demo}
+    admin-email: ${BIZMETRICS_BOOTSTRAP_ADMIN_EMAIL:test@bizmetrics.com}
+    admin-password: ${BIZMETRICS_BOOTSTRAP_ADMIN_PASSWORD:123456}
+    admin-nickname: ${BIZMETRICS_BOOTSTRAP_ADMIN_NICKNAME:BizMetrics 管理员}
+    company-name: ${BIZMETRICS_BOOTSTRAP_COMPANY_NAME:我的公司}
+    company-credit-code: ${BIZMETRICS_BOOTSTRAP_COMPANY_CREDIT_CODE:}
+    company-industry: ${BIZMETRICS_BOOTSTRAP_COMPANY_INDUSTRY:未设置}
+    company-taxpayer-type: ${BIZMETRICS_BOOTSTRAP_COMPANY_TAXPAYER_TYPE:未设置}
+    company-currency: ${BIZMETRICS_BOOTSTRAP_COMPANY_CURRENCY:CNY}
+  registration:
+    mode: ${BIZMETRICS_REGISTRATION_MODE:open}
+  security:
+    cors:
+      allowed-origins: ${BIZMETRICS_ALLOWED_ORIGINS:http://localhost:33000,http://127.0.0.1:33000}
+    auth:
+      max-failed-attempts: ${BIZMETRICS_AUTH_MAX_FAILED_ATTEMPTS:5}
+      max-failed-attempts-per-source: ${BIZMETRICS_AUTH_MAX_FAILED_ATTEMPTS_PER_SOURCE:50}
+      failure-window-minutes: ${BIZMETRICS_AUTH_FAILURE_WINDOW_MINUTES:15}
+      lock-minutes: ${BIZMETRICS_AUTH_LOCK_MINUTES:15}
+      trust-forwarded-headers: ${BIZMETRICS_AUTH_TRUST_FORWARDED_HEADERS:false}
+      cleanup-interval-ms: ${BIZMETRICS_AUTH_CLEANUP_INTERVAL_MS:3600000}
+      cleanup-initial-delay-ms: ${BIZMETRICS_AUTH_CLEANUP_INITIAL_DELAY_MS:3600000}
+      session-cleanup-interval-ms: ${BIZMETRICS_AUTH_SESSION_CLEANUP_INTERVAL_MS:3600000}
+      session-cleanup-initial-delay-ms: ${BIZMETRICS_AUTH_SESSION_CLEANUP_INITIAL_DELAY_MS:3600000}
+    password:
+      min-length: ${BIZMETRICS_PASSWORD_MIN_LENGTH:12}
+      require-complexity: ${BIZMETRICS_PASSWORD_REQUIRE_COMPLEXITY:false}
+  outbox:
+    enabled: ${BIZMETRICS_OUTBOX_ENABLED:true}
+    consumer:
+      enabled: ${BIZMETRICS_OUTBOX_CONSUMER_ENABLED:true}
+      fixed-delay-ms: ${BIZMETRICS_OUTBOX_CONSUMER_FIXED_DELAY_MS:5000}
+      batch-size: ${BIZMETRICS_OUTBOX_CONSUMER_BATCH_SIZE:20}
+      max-attempts: ${BIZMETRICS_OUTBOX_CONSUMER_MAX_ATTEMPTS:8}
+      stale-lock-minutes: ${BIZMETRICS_OUTBOX_CONSUMER_STALE_LOCK_MINUTES:10}
+  notifications:
+    enabled: ${BIZMETRICS_NOTIFICATIONS_ENABLED:true}
+    reminder:
+      enabled: ${BIZMETRICS_NOTIFICATION_REMINDERS_ENABLED:true}
+      fixed-delay-ms: ${BIZMETRICS_NOTIFICATION_REMINDER_FIXED_DELAY_MS:60000}
+      lease-ms: ${BIZMETRICS_NOTIFICATION_REMINDER_LEASE_MS:600000}
+      tax-lookahead-days: ${BIZMETRICS_NOTIFICATION_TAX_LOOKAHEAD_DAYS:7}
+      people-lookahead-days: ${BIZMETRICS_NOTIFICATION_PEOPLE_LOOKAHEAD_DAYS:14}
+      receipt-lookahead-days: ${BIZMETRICS_NOTIFICATION_RECEIPT_LOOKAHEAD_DAYS:7}
+    delivery:
+      enabled: ${BIZMETRICS_NOTIFICATION_DELIVERY_ENABLED:true}
+      fixed-delay-ms: ${BIZMETRICS_NOTIFICATION_DELIVERY_FIXED_DELAY_MS:10000}
+      batch-size: ${BIZMETRICS_NOTIFICATION_DELIVERY_BATCH_SIZE:20}
+      max-attempts: ${BIZMETRICS_NOTIFICATION_DELIVERY_MAX_ATTEMPTS:6}
+      stale-lock-minutes: ${BIZMETRICS_NOTIFICATION_DELIVERY_STALE_LOCK_MINUTES:10}
+      timeout-seconds: ${BIZMETRICS_NOTIFICATION_DELIVERY_TIMEOUT_SECONDS:5}
+  object-storage:
+    enabled: ${BIZMETRICS_OBJECT_STORAGE_ENABLED:false}
+    provider: minio
+    endpoint: ${BIZMETRICS_MINIO_ENDPOINT:http://localhost:9000}
+    access-key: ${BIZMETRICS_MINIO_ACCESS_KEY:minioadmin}
+    secret-key: ${BIZMETRICS_MINIO_SECRET_KEY:minioadmin}
+    bucket: ${BIZMETRICS_MINIO_BUCKET:bizmetrics}
+    region: ${BIZMETRICS_MINIO_REGION:us-east-1}
+    external-url: ${BIZMETRICS_MINIO_EXTERNAL_URL:}
+    presigned-url-expiry-seconds: ${BIZMETRICS_MINIO_PRESIGNED_URL_EXPIRY_SECONDS:600}
+    max-bytes-per-company: ${BIZMETRICS_RECEIPT_STORAGE_MAX_BYTES_PER_COMPANY:10737418240}
+    warning-percent: ${BIZMETRICS_RECEIPT_STORAGE_WARNING_PERCENT:80}
+    integrity-audit:
+      enabled: ${BIZMETRICS_RECEIPT_STORAGE_AUDIT_ENABLED:false}
+      poll-delay-ms: ${BIZMETRICS_RECEIPT_STORAGE_AUDIT_POLL_DELAY_MS:60000}
+      cadence-ms: ${BIZMETRICS_RECEIPT_STORAGE_AUDIT_CADENCE_MS:21600000}
+      lease-ms: ${BIZMETRICS_RECEIPT_STORAGE_AUDIT_LEASE_MS:1800000}
+      max-objects: ${BIZMETRICS_RECEIPT_STORAGE_AUDIT_MAX_OBJECTS:100000}
+      orphan-grace-ms: ${BIZMETRICS_RECEIPT_STORAGE_AUDIT_ORPHAN_GRACE_MS:3600000}
+      sample-size: ${BIZMETRICS_RECEIPT_STORAGE_AUDIT_SAMPLE_SIZE:10}
+
+logging:
+  level:
+    root: INFO
