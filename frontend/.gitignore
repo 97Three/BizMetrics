@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.edge-capture/
+.edge-capture-dark/
+.edge-check/
+.edge-check-new/
+.env.local
