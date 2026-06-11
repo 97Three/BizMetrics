@@ -1,0 +1,10 @@
+:root{
+ --ink:#0a1b2e; --ink2:#425466; --ink3:#6b7c93; --ink4:#8798a8;
+ --bg:#f6f8fc; --card:#fff; --line:#e6ecf3; --line2:#eef2f7;
+ --brand:#3659e3; --brand2:#6c8cff; --brand-soft:#eef2ff;
+ --green:#12b76a; --red:#f04438; --amber:#f79009;
+ --sh-sm:0 1px 2px rgba(16,24,40,.05);
+ --sh:0 1px 2px rgba(50,50,93,.06), 0 6px 16px -6px rgba(50,50,93,.12);
+ --sh-lg:0 2px 6px rgba(50,50,93,.08), 0 18px 40px -12px rgba(54,89,227,.22);
+}
+html.dark{--bg:#0b1220;--card:#121a2b;--line:#1f2a3d;--line2:#243146;--ink:#e9eefb;--ink2:#b8c4d9;--ink3:#8a99b3;--ink4:#66748c;--brand:#5b7cff;--brand2:#8aa4ff;--brand-soft:rgba(91,124,255,.14);--sh:0 1px 2px rgba(0,0,0,.4),0 8px 24px -10px rgba(0,0,0,.6)}
