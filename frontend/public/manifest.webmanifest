@@ -1,0 +1,16 @@
+{
+  "name": "BizMetrics · 经营数据工作台",
+  "short_name": "BizMetrics",
+  "description": "收入、成本、预算、票据与人力成本一屏掌握的经营数据工作台。",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f8fc",
+  "theme_color": "#3659e3",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
