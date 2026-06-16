@@ -1,0 +1,75 @@
+package com.bizmetrics.evidence.infrastructure;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.bizmetrics.evidence.domain.ReceiptVoucher;
+import com.bizmetrics.evidence.application.ReceiptVoucherRepository;
+import com.bizmetrics.evidence.domain.ReceiptVoucherDraft;
+import com.bizmetrics.platform.audit.application.AuditTrailService;
+import com.bizmetrics.platform.identity.account.application.UserDirectory;
+import com.bizmetrics.platform.tenant.Company;
+import com.bizmetrics.platform.tenant.CompanyRepository;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.Test;
+
+class DemoReceiptVoucherDataInitializerTest {
+    @Test
+    void createsEvidenceAndAuditFixturesOnce() {
+        ReceiptVoucherRepository receiptVouchers = mock(ReceiptVoucherRepository.class);
+        CompanyRepository companies = mock(CompanyRepository.class);
+        AuditTrailService auditTrail = mock(AuditTrailService.class);
+        UserDirectory userDirectory = mock(UserDirectory.class);
+        Company company = new Company();
+        company.id = 9;
+        company.entityType = "company";
+        UserDirectory.Entry owner = new UserDirectory.Entry(
+            3, "owner@bizmetrics.test", "Owner", "", null, 1, 15
+        );
+        List<ReceiptVoucher> inserted = new ArrayList<>();
+        AtomicLong ids = new AtomicLong(100);
+        when(companies.findAll()).thenReturn(List.of(company));
+        when(auditTrail.existsByEntityType("receipt_voucher")).thenReturn(false);
+        when(userDirectory.findAll()).thenReturn(List.of(owner));
+        when(receiptVouchers.findByCompany(company.id)).thenReturn(List.of());
+        when(receiptVouchers.insert(any())).thenAnswer(invocation -> {
+            ReceiptVoucherDraft draft = invocation.getArgument(0);
+            ReceiptVoucher voucher = new ReceiptVoucher();
+            voucher.id = ids.incrementAndGet();
+            voucher.companyId = draft.companyId();
+            voucher.voucherNo = draft.voucherNo();
+            voucher.title = draft.title();
+            inserted.add(voucher);
+            return voucher;
+        });
+        when(receiptVouchers.findAll()).thenAnswer(invocation -> List.copyOf(inserted));
+        DemoReceiptVoucherDataInitializer initializer = new DemoReceiptVoucherDataInitializer(
+            receiptVouchers,
+            companies,
+            auditTrail,
+            userDirectory
+        );
+
+        initializer.initialize();
+
+        assertEquals(8, inserted.size());
+        verify(receiptVouchers, times(8)).save(any());
+        verify(auditTrail, times(8)).record(
+            anyLong(),
+            anyString(),
+            anyLong(),
+            anyString(),
+            anyString(),
+            anyLong(),
+            anyString()
+        );
+    }
+}
