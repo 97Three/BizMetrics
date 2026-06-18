@@ -1,0 +1,299 @@
+# BizMetrics 企业内部模块架构
+
+> 本文是代码拆分与依赖治理规范。目标是模块化单体，而不是立即拆成微服务；先获得清晰边界、稳定契约和独立测试，再根据真实吞吐与团队边界决定是否物理拆分。
+
+## 1. 架构原则
+
+1. 按业务能力拆分，不按 Controller、Service、Repository 技术层横向堆放。
+2. 公司边界、人员身份、数据范围和产品模块必须在进入业务用例前确定。
+3. 写模型归所属模块，跨模块只通过应用服务、只读投影或领域事件协作。
+4. 聚合首页使用专门读模型，不让前端承担跨模块编排。
+5. PostgreSQL 是在线事实来源；进程内集合不得参与在线授权或业务判断。
+6. 外部副作用经 Outbox 传播，数据库事务内不直接依赖消息系统或 Webhook。
+7. 模块开关是后端能力边界，不只是导航配置。
+
+## 2. 目标模块图
+
+```mermaid
+flowchart TB
+    host[企业门户 / IAM] --> identity[Platform Identity]
+    identity --> access[Access Context]
+    tenant[Company Memberships] --> access
+    product[Product Module Catalog] --> access
+
+    access --> accessManagement[Access Management]
+    access --> workspace[Workspace Read Model]
+    access --> approvals[Approvals]
+    access --> operations[Operations]
+    access --> budget[Budget Control]
+    access --> finance[Finance & Accounts]
+    access --> evidence[Evidence & Receipts]
+    access --> tax[Tax Workspace]
+    access --> people[People Core]
+    access --> workforce[Workforce Cost]
+
+    operations --> budget
+    evidence -->|TransactionLinkQuery| operations
+    approvals --> evidence
+    finance --> workspace
+    evidence --> workspace
+    budget --> workspace
+    approvals --> workspace
+    people --> workforce
+    workforce --> workspace
+
+    operations --> outbox[(Outbox)]
+    budget --> outbox
+    approvals --> outbox
+    evidence --> outbox
+    tax --> outbox
+```
+
+依赖方向是从业务用例指向平台契约或所属仓储。`workspace` 可以读取多个模块的投影，但不能反向成为它们的写入口。
+
+## 3. 模块能力拆分
+
+| 边界 | 命令职责 | 查询职责 | 主要数据 | 对外契约 |
+| --- | --- | --- | --- | --- |
+| `platform.identity` | 本地账户、凭证、资料、会话与注册邀请生命周期 | 当前 Actor、账户、邀请摘要 | `users/auth_tokens/registration_invites`/外部身份声明 | `ActorContext`、`@CurrentActor` |
+| `platform.tenant` | 公司主体资料、主体间资金划转、成员关系 | 公司、划转历史、角色、部门、范围 | `companies/entity_transfers/company_memberships` | `CompanyRepository`、`EntityTransferRepository`、`CompanyMembershipRepository` |
+| `platform.access` | 权限校验 | 完整访问上下文 | 角色权限矩阵 | `/platform/access-context` |
+| `platform.audit` | 追加审计事件 | 管理员分页检索、业务对象历史 | `audit_logs` | `AuditTrailService`、`GET /audit-logs` |
+| `access-management` | 公司成员和角色维护 | 成员、角色、数据范围 | `users/company_memberships` | `/admin/users` |
+| `platform.product` | 模块启停 | 已启用能力 | 环境配置 | `ProductModuleCatalog`、`@RequiresProductModule` |
+| `workspace` | 无业务写入 | 跨模块健康度、待办、指标 | SQL 投影 | `GET /workspace` |
+| `approvals` | 提交、通过、驳回、撤回 | 我的申请/待办/轨迹 | `approval_requests/actions` | `/approvals`、Outbox |
+| `operations` | 流水、分类 | 趋势、结构、经营风险及最小关联身份 | `transactions/categories` | `/transactions`、`/stats`、`TransactionLinkQuery` |
+| `recurring` | 周期规则维护、启停和执行 | 下次执行日、执行次数 | `recurring_items` | `/recurring`、`RecurringItemRepository` |
+| `budget` | 创建、调整、停用预算 | 执行额、使用率、风险 | `budgets` + 流水投影 | `/budgets`、Outbox |
+| `finance` | 账户维护、余额调整、对账 | 可用资金、账户风险 | `accounts/ledgers` | `/accounts`、`/ledgers` |
+| `evidence` | 票据、附件、审批/入账状态 | 凭证缺口、审计链 | `receipt_vouchers`、对象存储 | `/receipts`、Outbox |
+| `tax` | 税务事项创建、调整和删除 | 申报、缴款与风险状态 | `tax_items` | `/enterprise/tax-items`、Outbox |
+| `people-core` | 部门、员工与任职信息维护 | 组织、人员状态与经营投影 | `departments/employees/employment_events` | `/enterprise/departments`、`/enterprise/employees`、`/enterprise/employment-events`、部门/员工 Outbox |
+| `workforce-cost` | 薪酬批次生成、锁定 | 公司/部门人力成本、预算差异、趋势 | `payroll_runs/items` + 人员/流水只读投影 | `/payroll-runs`、`GET /workforce-cost` |
+| `notifications` | 偏好与发送状态 | 站内通知 | `notifications/deliveries` | `/notifications` |
+
+`access-management` 是默认核心能力。`people-core`、`workforce-cost`、`talent-suite`（福利、绩效）、税务、政策和备份 UI 是可选能力包。任何可选能力都不允许成为核心模块的反向依赖。
+
+`bootstrap` 不是业务模块，也不向运行期用例暴露查询或写入 API；它只负责按配置编排首次管理员、首次企业数据和本地演示夹具。`demo` 通过 `InitialAdminDataInitializer -> DemoEnterpriseDataInitializer ->` 各模块初始化器维持显式夹具顺序；生产上下文不注册这些 demo Bean，而由 `EnterpriseDataInitializer` 一次调用事务型 `ProductionBootstrapCommand`，不能依赖历史 Store 或未装配 Bean 的副作用。
+
+## 4. 统一访问上下文
+
+所有新模块使用下面的入口模型：
+
+```text
+ActorContext
+  -> AccessContextService
+      -> enabled company
+      -> membership role/scope/department
+      -> permissions
+      -> enabled product modules
+```
+
+前端通过一次请求获得：
+
+```json
+{
+  "actor": {},
+  "company": {},
+  "companies": [],
+  "role": "finance_admin",
+  "scope": "company",
+  "departmentId": null,
+  "permissions": ["finance.read", "budget.manage"],
+  "modules": { "mode": "internal-module", "enabled": ["workspace", "budgets", "access-management"] }
+}
+```
+
+规则：
+
+- Controller 不自行解析用户 ID 或相信客户端提交的操作者字段。
+- companyId 必须由访问上下文校验，不能只作为普通过滤参数。
+- `department` 和 `self` 范围必须进入 SQL 谓词；仅在 Java 返回后过滤会扩大数据暴露和读取成本。
+- `readonly` 表示公司级只读，是否可执行命令仍由 permission 判断。
+- 可选模块 API 使用 `@RequiresProductModule`，关闭时统一返回 404。
+
+## 5. 模块内部结构
+
+新拆出的业务模块采用纵向目录：
+
+```text
+com.bizmetrics.<module>/
+  api/             HTTP DTO、Controller、序列化契约
+  application/     用例编排、事务边界、权限入口
+  domain/          业务规则、值对象、状态机
+  infrastructure/  JDBC 仓储、外部系统适配器
+```
+
+预算模块是当前模板：
+
+```text
+budget/
+  api/BudgetController
+  api/BudgetCreateRequest
+  api/BudgetUpdateRequest
+  application/BudgetRepository
+  application/BudgetApplicationService
+  domain/BudgetPolicy
+  infrastructure/JdbcBudgetRepository
+```
+
+拆分下一个模块时，应复制结构原则，而不是复制具体实现。
+
+人力成本读模型也采用同一纵向结构：
+
+```text
+workforce/
+  api/WorkforceCostController
+  api/WorkforceCostView
+  application/WorkforceCostApplicationService
+  infrastructure/WorkforceCostReadRepository
+```
+
+该模块不复制员工或薪酬写模型：正式口径读取 `payroll_run_items` 快照；未生成批次时读取员工成本估算，并在响应中返回明确的 `source`。
+
+## 6. API 与命令约束
+
+### 6.1 DTO
+
+- 新写接口不得以 `Map<String, Object>` 作为长期契约。
+- 请求 DTO 使用 Bean Validation；金额、日期、状态和长度在 API 边界校验。
+- 响应 DTO 不直接泄露密码散列、内部存储密钥或无授权的公司字段。
+- 部分更新必须区分“未提交字段”和“明确清空字段”。预算用 `clearCategory` 展示了该语义。
+
+### 6.2 重试与并发
+
+- 关键创建请求接受 `Idempotency-Key`，数据库使用唯一索引保证最终防重。
+- 账户、交易、预算、票据和审批使用版本字段或行锁保护并发写入。
+- 客户端编辑预算、票据或流水时提交读取到的 `version`，流水删除同样要求版本；过期版本返回 409，票据审批或流水退款造成的版本变化会使已打开的旧意图失效。
+- 冲突、参数错误和约束错误由统一 `ProblemDetail` 响应处理。
+
+### 6.3 可观测性
+
+- 每个请求接收或生成 `X-Request-Id`，响应回传并写入 MDC。
+- 审计日志记录人员、公司、对象、动作和摘要。
+- 模块事件先写 `outbox_events`，事务提交后再发送通知或外部消息。
+
+## 7. 工作台读模型
+
+工作台只做查询聚合，当前在一个 `REPEATABLE_READ` 只读事务中计算：
+
+- 本月收入、成本和经营净额；
+- 可用资金与账户问题；
+- 预算执行和高风险预算；
+- 待审批数量；
+- 票据证据缺口；
+- 逾期周期事项；
+- 模块健康度、优先动作和日清检查。
+
+工作台遵循权限裁剪：无财务读取权限时，资金与票据指标返回空值或不生成模块；部门/本人范围只聚合允许的人员数据。
+
+前端不得重新并发请求这些下游接口来重算同一组指标，否则会产生快照不一致和重复规则。
+
+## 8. 数据所有权
+
+| 表或投影 | 所属模块 | 其他模块如何使用 |
+| --- | --- | --- |
+| `users` | Platform Identity | 认证与资料通过本地账户仓储读写；Access Management 仅使用不含密码的权限管理投影，禁止维护进程内用户副本 |
+| `companies` | Platform Tenant | 公司资料由 `CompanyRepository` 直接读写 PostgreSQL；访问控制和业务初始化器只读取租户契约，禁止通过旧 Store 修改主体 |
+| `entity_transfers` | Platform Tenant | 主体划转由 `EntityTransferRepository` 在 SQL 中按可访问主体过滤并追加，禁止更新、删除历史记录或通过旧 Store 读写 |
+| `company_memberships` | Platform Tenant | 只通过成员仓储读取 |
+| `auth_tokens` | Platform Identity | 本地身份适配器按令牌摘要创建、认证、撤销和清理，其他模块不得直接访问 |
+| `registration_invites` | Platform Identity | 邀请仓储按 SHA-256 摘要发行并以行锁单次消费；原始凭证只在创建响应披露一次 |
+| `login_failure_states` | Platform Identity | 登录安全服务按摘要键原子累加和清理，业务模块不得直接读写 |
+| `transactions`、`categories` | Operations | 流水通过 `TransactionWriteRepository`/`TransactionQueryRepository`、分类通过 `CategoryRepository` 直接读写 PostgreSQL；Evidence 只通过 `TransactionLinkQuery` 读取流水 ID、公司和所有者，Budget/Workspace 仅使用公司范围内的契约或 SQL 投影 |
+| `recurring_items` | Recurring | 通过专属仓储加行锁维护规则和执行游标；Operations 仅接收执行后创建流水的命令 |
+| `budgets` | Budget | 专属 JDBC 仓储是唯一写入口；Operations 只请求匹配预算，Workspace 只读 |
+| `accounts`、`ledgers`、`ledger_members` | Finance | Operations 通过账户 ID 和公司内可访问账本契约校验与调整 |
+| `receipt_vouchers`、`receipt_file_hashes` | Evidence | 票据写入经 `ReceiptVoucherRepository`/`ReceiptFileHashRepository`；Approval 应用层通过 `ApprovalEntityGateway` 调用窄化的审批状态契约，不直接依赖票据仓储或完整用例服务 |
+| `tax_items` | Tax | 专属 JDBC 仓储直接读写；企业汇总、通知和税务合规报告只读公司范围投影 |
+| `departments`、`employees`、`employment_events` | People Core | 部门、员工和追加式任职历史分别由 `DepartmentRepository`、`EmployeeRepository`、`EmploymentEventRepository` 直接读写 PostgreSQL；Workforce Cost 仅通过有范围约束的 SQL 投影读取 |
+| `payroll_runs`、`payroll_run_items` | Workforce Cost | 报表与工作台只读已锁定或明确标识状态的快照 |
+| `approval_requests/actions` | Approvals | `ApprovalRepository` 是唯一写入口；Workspace 只读待办数量 |
+| `audit_logs` | Platform Audit | 业务模块只追加，不修改历史 |
+| `outbox_events` | Platform Events | 消费器按事件类型分发 |
+
+禁止通过另一个模块的公开 Map 修改对象。跨模块写入必须调用应用服务；高频聚合允许直接读取稳定投影，但不能借此写回所属表。
+
+## 9. 数据库与部署基础
+
+V8 迁移建立了：
+
+- 权威 `company_memberships` 表及公司、用户、部门外键；
+- 关键表 `version` 字段；
+- 交易、票据和审批的幂等键及唯一索引；
+- 金额、日期、状态和公司 ID 的基础约束；
+- 常用成员查询索引。
+
+在线服务读取已经从进程 Map 切到 PostgreSQL。周期事项由专属 JDBC 仓储直接读写，V15 将金额、日期、公司归属和执行游标收紧为数据库约束。预算同样由应用层仓储契约和 JDBC 实现直接读写，V16 将金额、日期、时间戳、公司/用户归属及投影状态收紧为强类型约束，并移除了旧预算 Map、双写与启动全表重算。V17 将流水金额、业务日期、退款标记和生命周期时间改为 `NUMERIC(18,4)`、`DATE`、`BOOLEAN` 与 `TIMESTAMPTZ`，增加公司内账户/分类/账本/预算/原流水复合外键，并移除流水 Map、重载和事务后双写。V18 将资金账户金额、日期、净资产标记和生命周期时间改为 `NUMERIC(20,4)`、`DATE`、`BOOLEAN` 与 `TIMESTAMPTZ`，强制公司/用户归属及公司内账本引用，并移除账户 Map、重载和事务后双写。V19 将账本默认标记和生命周期时间改为 `BOOLEAN` 与 `TIMESTAMPTZ`，为账本成员补充不可为空的公司范围，并通过公司成员复合外键、每公司唯一默认账本索引和 owner 成员约束阻止跨公司授权或删除所有者。V20 将分类生命周期改为 `TIMESTAMPTZ`，以公司成员复合外键、个人公司范围内名称唯一约束和数据库触发器保护分类归属及已引用分类的收支语义；分类 JDBC 仓储是唯一事实源，不再双写进程 Map。
+
+V21 将税务金额、税率、日期和生命周期时间改为 `NUMERIC`、`DATE` 与 `TIMESTAMPTZ`，以公司外键、公司税种期间唯一约束和申报/缴款检查约束保护税务流程；税务事项由专属仓储直接读写，旧税务 Map、启动重载和重复补种已删除。V22 将部门预算和生命周期时间改为 `NUMERIC(20,2)` 与 `TIMESTAMPTZ`，以公司内复合外键、规范化名称唯一索引和不可变触发器保护部门、负责人、员工及成员的租户关系；部门专属仓储已取代旧部门 Map 和 Map 型写命令。V23 将员工薪酬、日期和生命周期字段改为 `NUMERIC(20,4)`、`DATE` 与 `TIMESTAMPTZ`，以公司内直属经理复合外键、用户/核验人外键、规范化邮箱/工号唯一索引及公司归属不可变触发器保护人员数据；员工专属仓储已取代旧员工 Map、SQL 映射和双写。V24 将任职事件生效日期和创建时间改为 `DATE` 与 `TIMESTAMPTZ`，通过公司内员工复合外键、操作者外键、类型/备注约束和不可更新触发器保护追加式人员历史；任职事件专属仓储已取代旧事件 Map、SQL 映射和写入口。V25 将公司生命周期时间改为 `TIMESTAMPTZ`，增加乐观锁版本、所有者外键、规范化信用代码唯一索引、主体类型/币种/地区/财年约束和所有者不可变触发器；公司专属仓储已取代旧公司 Map、SQL 映射和写入口。V26 将主体划转金额、日期和生命周期时间改为 `NUMERIC(20,4)`、`DATE` 与 `TIMESTAMPTZ`，以双边主体/操作者外键、正金额、合法类型、不同主体和禁止更新或删除的触发器保护追加式划转历史。V27 在 Flyway 事务内一次性回填历史票据派生默认值，生产启动不再注册票据兼容修复 Bean。
+
+V28 一次性规范历史公司所有者成员，并只补齐缺失的经营账本、账本成员和所有者收入/支出分类。生产首次公司与 HTTP 在线创建公司统一由 `CompanyProvisioningService` 在业务事务内写入主体、成员、账本和分类；生产 `bootstrap` 上下文不再注册账本或分类扫描 Bean，相关扫描只保留在显式 demo 初始化器。生产启动也不再执行公司画像、员工薪酬、职位权限或票据的全表兼容修复。`EnterpriseStore` 和 `InMemoryStore` 均已删除：跨模块审计统一经 `AuditTrailService` 追加，所有在线业务数据均以 PostgreSQL 为唯一事实源。
+
+V29 为外部 Webhook 投递增加唯一租约令牌和终态 fencing。`notification_deliveries` 仍通过 `FOR UPDATE SKIP LOCKED` 抢占批次，但只有持有当前 `lock_token` 的工作线程可以写入 delivered、failed 或 dead；正式请求同时携带稳定的 `Idempotency-Key`，自建接收方负责按该键实现副作用幂等。
+
+V30 增加平台级 `scheduled_job_leases` 与 `DistributedJobCoordinator`。通知提醒以 PostgreSQL 时钟原子认领固定任务名，只有当前 token 可以完成或记录失败；完成时间决定下一次可运行时间，崩溃实例的租约过期后允许其他实例接管。提醒生成仍使用通知去重键保护部分执行后的重试，租约表作为运行态在结构化恢复时清空。
+
+V31 将票据金额、税率、日期和生命周期时间改为 `NUMERIC`、`DATE` 与 `TIMESTAMPTZ`，以状态/金额/日期检查、公司与流水复合外键、公司归属不可变触发器和文件哈希复合外键保护 Evidence 数据。列表筛选与汇总直接使用 typed 列及公司前缀索引，不再在查询期清理并转换历史文本。
+
+V32 将附件 SHA-256 收口为规范值对象和数据库 `VARCHAR(64)`，文件名统一为有界 basename，创建时间改为 `TIMESTAMPTZ`；附件登记使用 typed command，数据库拒绝非法摘要、路径、负大小、非有限时间和原位修改。上传在读取完整内容前完成大小、名称和文件真实性校验，结构化备份验证 typed 附件元数据可往返恢复。
+
+流水更新与删除必须携带客户端读取到的 `version`。`TransactionMutationService` 在公司和所有者范围判断后、账户余额和预算占用调整前比较锁定行版本；旧版本使用统一 409 拒绝，JDBC 带版本 SQL 继续提供第二层保护。退款仍作为新业务事件按原流水行锁串行，退款引起的版本递增会使旧编辑和旧删除意图失效。
+
+票据关联流水只通过 Operations 应用层的 `TransactionLinkQuery` 读取不可变的 `TransactionLinkTarget`；该投影仅含流水、公司和所有者 ID，避免 Evidence 依赖通用流水仓储、可变聚合以及账户/分类联表。
+
+生产首次管理员和首个公司已收口到 `ProductionBootstrapCommand`：命令在同一事务内取得固定 PostgreSQL transaction advisory lock，持锁后重新检查租户根，再一起写入管理员、公司工作区、管理部门、创始人员工档案、任职事件和审计记录。事务失败时全部回滚，等待锁的其他实例可继续重试；已存在用户但公司为空的旧中间态只读取一个首选管理员并补齐首家公司。
+
+审批用例与持久化边界已完成纵向收口：`ApprovalApplicationService` 只编排访问控制、状态机、审计和业务对象网关，`ApprovalRepository` 负责审批请求、动作轨迹、分页汇总以及幂等键/业务对象的 PostgreSQL 事务锁。响应记录已拆到稳定的 API/Domain 类型，HTTP JSON 契约保持不变。
+
+票据用例也已迁入 `evidence.api/application`：`ReceiptApplicationService` 只通过 `ReceiptVoucherRepository` 与 `ReceiptFileHashRepository` 访问票据数据，JDBC 与 SQL 位于对应 infrastructure 适配器。相同公司与 SHA-256 的并发上传先获取 PostgreSQL 事务 advisory lock，再检查重复文件，确保只创建一个凭证并让另一个请求稳定返回冲突。Approval 适配器只依赖 `ReceiptApprovalStatusService`，不再注入完整票据用例服务。
+
+`ReceiptVoucher` 已从共享 `Models` 迁入 `evidence.domain`。票据 JSON 创建与更新入口使用 Bean Validation DTO，并映射到 transport-independent application command；金额、日期、状态和长度在入库前校验，`approvalStatus` 禁止由公开票据接口写入，部分更新继续区分字段省略与显式 `null`。公开更新还必须提交客户端读取到的 `version`；版本比较在租户和权限判断后、任何领域修改前执行，旧页面更新稳定返回 409。
+
+票据单文件与批量上传也共享 validated multipart DTO，并映射为不依赖 Web 的 `ReceiptUploadCommand`。应用层返回 typed voucher 或不可变批量结果，API 响应保持既有 JSON 结构；共享元数据在对象存储和数据库操作前校验，逐文件格式、存储及重复冲突仍按部分成功语义汇总。
+
+票据列表使用 validated query DTO 映射为 `ReceiptListQuery`，非法公司 ID、金额、日期、枚举和分页参数不再静默降级。筛选、COUNT、稳定分页及 typed `ReceiptSummary` 聚合已下推 Evidence JDBC 适配器；列表在只读 `REPEATABLE_READ` 事务内保持总数与当前页一致，关键字 LIKE 元字符按字面量处理。
+
+生命周期级 `SingleInstanceDatabaseGuard` 已删除。生产部署通过 `BIZMETRICS_BACKEND_REPLICAS` 明确控制后端副本数，默认为 1；多副本发布自动逐实例验证 readiness、共享会话和全局注销，预生产可显式演练单副本停止与重新加入。扩容时仍必须合并计算数据库连接预算，并以双容器并发压测验证目标容量，而不是依赖进程锁掩盖并发缺陷。
+
+## 10. 后续拆分顺序
+
+### P0：完成核心边界
+
+- 审批用例、持久化端口和 JDBC 适配器已迁入纵向模块，并通过 `ApprovalEntityGateway` 隔离多态业务对象。
+- 票据 Controller、应用服务、仓储端口、领域模型、全部写命令、列表/汇总查询、V31 票据 schema 及 V32 附件元数据已迁入 Evidence 纵向模块；下一步收口会计联动的跨模块查询契约。
+- 账户用例已归入 Finance 模块；继续清理跨模块直接仓储依赖，保持账户写入只经过 Finance 契约。
+- 给账户及其余聚合查询补齐 typed DTO 与客户端版本契约。
+- 将权限判断从旧整数角色进一步收口到 AccessContext。
+- 将组织人员和薪酬写用例逐步迁入 `people`、`workforce` 纵向目录；现有聚合读模型保持稳定契约。
+
+### P1：清除兼容状态
+
+- 演示数据已按 `bizmetrics.bootstrap.mode=demo` 条件装配，生产 `bootstrap` 上下文不注册 demo 业务初始化器；后续可进一步迁为独立开发脚本。
+- `EnterpriseStore` 已完成退场；保持审计只能通过 `AuditTrailService` 追加，启动数据只能由 `EnterpriseDataInitializer` 编排。
+- `InMemoryStore` 已完成退场；demo 管理员只能由 `InitialAdminDataInitializer` 创建，生产首次管理员只能由 `ProductionBootstrapCommand` 创建，不得恢复进程内兼容集合或横向 Store 工具。
+- 继续收紧公司、主体划转、人员、税务事项、分类、预算、周期事项、流水、资金账户、账本及成员之间的应用层契约，保持强类型持久化边界。
+
+### P2：集成宿主平台
+
+- 增加 OIDC/SAML 身份适配器和 JIT 成员映射。
+- 定义公司、部门和人员主数据同步契约。
+- 把通知目标接到企业消息总线，保留站内通知降级路径。
+
+### P3：按证据决定物理拆分
+
+只有当独立发布节奏、资源隔离、合规边界或吞吐瓶颈真实存在时，才把某一模块拆成服务。拆分前要求其 API、事件、表所有权和回归测试已经稳定。
+
+## 11. 合并检查清单
+
+新功能合并前至少确认：
+
+- [ ] 归属一个明确模块，没有新增跨模块 Map 访问；
+- [ ] Actor、companyId、scope 和 permission 都经过统一校验；
+- [ ] 可选能力同时有前端和后端模块门禁；
+- [ ] 写请求有 DTO 校验，重试场景考虑幂等性；
+- [ ] 并发更新使用版本或行锁；
+- [ ] 跨模块副作用有审计和 Outbox；
+- [ ] 查询避免 N+1，并有分页或有界 limit；
+- [ ] 单元测试、类型检查、Lint 与可用的 PostgreSQL 集成测试通过。

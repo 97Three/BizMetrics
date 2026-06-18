@@ -1,0 +1,128 @@
+# BizMetrics 企业经营协同产品定位
+
+> 状态：已采用。BizMetrics 默认以 `internal-module` 模式运行，聚焦费用、预算、审批、资金和审计闭环；组织人力、税务、政策等能力作为可选扩展。
+
+## 一句话定位
+
+BizMetrics 是面向中小企业的费用、预算与审批协同平台，把经营流水、预算、账户、票据、审批和权限连接成一条可追踪的内部控制链路。
+
+## 目标使用方式
+
+BizMetrics 默认由企业已有门户、统一身份平台或内部应用中心承载入口。它可以独立部署，但产品边界仍按内部模块设计：
+
+- 宿主平台负责员工主身份、组织主数据、统一登录、应用授权和消息入口。
+- BizMetrics 负责公司上下文、组织人员的经营投影、经营与财务权限、业务单据、预算控制、人力成本、审批状态和审计证据。
+- 身份通过 `ActorIdentityProvider` 接入；当前本地 Token 只是一个适配器，后续可替换为 OIDC、SAML 网关或企业会话。
+- 页面通过统一的 `AccessContext` 获得当前人员、公司、角色、数据范围、权限和已启用模块。
+
+## 默认核心范围
+
+| 模块 | 解决的问题 | 主要入口 | 核心权限 |
+| --- | --- | --- | --- |
+| 统一工作台 | 今天有哪些风险、待办和异常需要处理 | `/dashboard`、`GET /api/v1/workspace` | 按下游权限自动裁剪 |
+| 审批协同 | 报销、付款和业务申请由谁处理、当前到哪一步 | `/approvals` | `approval.manage` |
+| 经营流水 | 收入、成本、退款和经营说明是否完整 | `/transactions` | `operations.read/write` |
+| 预算控制 | 公司或成本分类预算是否接近或超过上限 | `/budgets` | `budget.manage` |
+| 经营分析 | 收入、成本、净额和异常结构如何变化 | `/operations`、`/reports` | `operations.read`、`reports.read` |
+| 周期事项 | 房租、订阅、固定付款等事项是否按期执行 | `/recurring` | `operations.read/write` |
+| 资金账户 | 可用资金、冻结资金和对账状态是否可靠 | `/finance`、`/accounts` | `finance.read/write` |
+| 票据证据 | 流水、票据、附件、审批和入账是否闭环 | `/receipts` | `finance.read/write` |
+| 公司权限 | 公司成员、角色和数据范围是否正确 | `/admin/users`、`GET /api/v1/platform/access-context` | `admin.permissions`、`company.manage` |
+| 平台设置 | 公司切换、个人偏好和能力上下文 | `/settings` | `company.switch` 等 |
+
+默认核心范围刻意保持短链路：
+
+```text
+经营事项 -> 流水/单据 -> 预算与审批 -> 资金与票据 -> 工作台与报表
+```
+
+## 产品能力包
+
+人员能力按“经营必需”和“人才扩展”拆分，避免一个 HR 总开关同时暴露所有页面：
+
+| 能力包 | 模块键 | 默认 | 开关 |
+| --- | --- | --- | --- |
+| 公司成员与权限 | `access-management` | 开启且不可关闭 | 无 |
+| 组织人员核心 | `people-core` | 关闭 | `BIZMETRICS_MODULE_PEOPLE_CORE_ENABLED` |
+| 人力成本与薪酬月结 | `workforce-cost` | 关闭 | `BIZMETRICS_MODULE_WORKFORCE_COST_ENABLED` |
+| 人才扩展（福利、绩效） | `talent-suite` | 关闭 | `BIZMETRICS_MODULE_TALENT_SUITE_ENABLED` |
+| 家庭主体 | `household` | 关闭 | `BIZMETRICS_MODULE_HOUSEHOLD_ENABLED` |
+| 税务工作台 | `tax` | 关闭 | `BIZMETRICS_MODULE_TAX_WORKSPACE_ENABLED` |
+| 政策中心 | `policy` | 关闭 | `BIZMETRICS_MODULE_POLICY_CENTER_ENABLED` |
+| 备份恢复 UI | `backup` | 关闭 | `BIZMETRICS_MODULE_BACKUP_UI_ENABLED` |
+
+本次能力拆分是断代升级：旧 `BIZMETRICS_MODULE_HR_SUITE_ENABLED` 配置和 `organization/people/compensation/benefits/performance` 模块键均不再识别，也不会出现在访问上下文中。
+
+可选模块关闭时，系统会同时执行三层收敛：
+
+1. 不下发对应导航和搜索结果；
+2. 前端直接访问旧路由时返回工作台；
+3. 标有 `@RequiresProductModule` 的后端 API 返回 404。
+
+这避免模块开关只停留在“菜单隐藏”。
+
+## 明确不做什么
+
+默认模式不承担以下系统的主数据职责：
+
+- 不替代企业 IAM、通讯录和组织架构主系统；
+- 不替代完整 HRIS、考勤、绩效或电子合同系统；组织人员只保存经营管理所需的投影；
+- 不替代总账、法定会计核算、银行或正式税务申报系统；
+- 不在一个首页堆叠所有历史功能；
+- 不让家庭资产、演示政策或地区税务口径进入默认企业导航。
+
+需要这些能力时，应作为独立能力包启用，并通过明确契约集成，而不是继续扩大核心模块。
+
+## 人员、公司和数据范围
+
+企业内部模块的授权边界是：
+
+```text
+Actor（登录人员） + Company（当前公司） + Role（角色）
++ Scope（数据范围） + Permission（操作能力） + Enabled Module（产品能力）
+```
+
+`company_memberships` 是账号与公司授权关系的权威表；员工档案只是可选业务资料，不再承担登录授权的唯一来源。
+
+支持的数据范围包括：
+
+- `group`：多公司集团；
+- `company`：当前公司；
+- `company_set`：指定公司集合；
+- `department`：当前部门；
+- `self`：本人数据；
+- `readonly`：公司级只读观察。
+
+工作台与全局搜索已经把数据范围落实到查询条件，不仅在页面上显示范围名称。
+
+## 产品体验原则
+
+- 一个工作台：默认首页只回答“现在怎样、哪里有风险、下一步做什么”。
+- 一次上下文加载：身份、公司、角色、权限和模块通过一个接口获取。
+- 一条证据链：业务流水、预算、审批、账户、票据和审计记录可相互追踪。
+- 一种错误契约：校验、冲突和并发错误使用统一 Problem Detail 响应，并带 `X-Request-Id`。
+- 一套重试语义：关键创建命令使用 `Idempotency-Key`，防止网络重试产生重复数据。
+- 一致的公司隔离：所有核心读取必须显式带公司边界，聚合查询同时应用数据范围；审批引用的交易、预算、员工、薪酬批次和票据也必须属于所选公司。
+- 一个稳定导航：公司默认只有五个一级模块；可选能力归入相应业务组，不新增平级信息孤岛。
+
+## 成功指标
+
+内部模块是否有效，不以页面数量衡量，优先看：
+
+- 工作台一次加载完成率和 P95 响应时间；
+- 待审批、待对账、缺票据和预算预警的平均处理时长；
+- 重复创建、跨公司读取和并发覆盖事件数；
+- 核心业务动作的审计覆盖率；
+- 可选模块关闭后核心用户完成日常任务所需的页面跳转数。
+
+## 当前过渡说明
+
+- 预算已按 `api/application/domain/infrastructure` 完成首个模块化试点。
+- 工作台已改为后端聚合读模型，前端不再并发拼装大量接口。
+- 人力成本已拆为独立后端聚合读模型，优先使用薪酬月结快照，无批次时明确标记为员工档案估算。
+- 审批用例已从旧横向 Service 迁入 `approval.application`，请求、动作、分页汇总与事务锁统一经 `ApprovalRepository` 持久化；多态业务对象通过 `ApprovalEntityGateway` 校验公司归属，不存在或跨公司的引用会在创建审批前被拒绝。
+- 票据入口与用例已迁入 `evidence.api/application`，票据及文件哈希分别由应用层仓储端口和 JDBC 适配器承接；同公司相同文件的并发上传通过 PostgreSQL 事务锁串行去重，审批模块只调用窄化的票据状态同步契约，流水关联只读取不可变的流水/公司/所有者身份投影。
+- 公司主体、主体划转、资金账户、账本及成员、流水、分类、预算、周期事项、税务事项、部门、员工与任职事件已移除旧 Store 中的 Map 和双写，以 PostgreSQL 专属仓储为唯一事实源；流水由 V17、账户由 V18、账本及成员由 V19、分类由 V20、税务事项由 V21、部门由 V22、员工由 V23、任职事件由 V24、公司主体由 V25、主体划转由 V26 的类型、租户和流程约束保护。`EnterpriseStore` 与 `InMemoryStore` 均已删除；审计归 `AuditTrailService`，demo 身份归 `InitialAdminDataInitializer`，生产首次管理员与企业数据统一归 `ProductionBootstrapCommand`。
+- 生产启动期全表兼容修复已经删除，票据派生默认值由 V27 一次性回填，历史公司工作区由 V28 一次性补齐；新公司在业务事务内创建成员、账本和分类，账本/分类扫描仅保留在 demo 条件 Bean。V29 已为外部 Webhook 投递增加唯一租约 fencing 与稳定幂等键，V30 已用 PostgreSQL 持久化租约协调通知提醒，V31 已硬化票据 typed schema、租户关系和生命周期约束，V32 已类型化并固化附件摘要、规范文件名、大小和创建时间。生产 bootstrap 已改为事务锁保护的原子命令并删除生命周期级单实例 guard，部署可通过 `BIZMETRICS_BACKEND_REPLICAS` 启用多个后端副本，默认仍为 1。
+
+代码边界和后续拆分规则见 [ENTERPRISE_MODULE_ARCHITECTURE.md](ENTERPRISE_MODULE_ARCHITECTURE.md)。
