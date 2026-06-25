@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env.production}"
+COMPOSE_FILE="${COMPOSE_FILE:-$ROOT_DIR/docker-compose.prod.yml}"
+SKIP_BACKUP="${SKIP_BACKUP:-false}"
+SKIP_SMOKE="${SKIP_SMOKE:-false}"
+SKIP_REPLICA_SMOKE="${SKIP_REPLICA_SMOKE:-false}"
+RUN_CONCURRENCY_SMOKE="${RUN_CONCURRENCY_SMOKE:-false}"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "Missing env file: $ENV_FILE" >&2
+  exit 1
+fi
+
+ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" "$ROOT_DIR/scripts/check-prod-env.sh"
+
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+
+WAIT_TIMEOUT_SECONDS="${BIZMETRICS_SERVICE_WAIT_TIMEOUT_SECONDS:-180}"
+if ! [[ "$WAIT_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BIZMETRICS_SERVICE_WAIT_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 1
+fi
+BACKEND_REPLICAS="${BIZMETRICS_BACKEND_REPLICAS:-1}"
+if ! [[ "$BACKEND_REPLICAS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BIZMETRICS_BACKEND_REPLICAS must be a positive integer" >&2
+  exit 1
+fi
+
+compose() {
+  docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"
+}
+
+compose config >/dev/null
+compose build backend frontend
+
+if [[ "$SKIP_BACKUP" != "true" ]]; then
+  ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" \
+    BIZMETRICS_BACKUP_KEEP_APPLICATION_STOPPED=true \
+    "$ROOT_DIR/scripts/backup-prod.sh"
+else
+  echo "Entering deployment maintenance window without a backup"
+  compose stop caddy frontend backend >/dev/null
+fi
+
+compose up -d --no-build --scale backend="$BACKEND_REPLICAS" --wait --wait-timeout "$WAIT_TIMEOUT_SECONDS"
+compose ps
+
+if [[ "$SKIP_SMOKE" != "true" ]]; then
+  ENV_FILE="$ENV_FILE" "$ROOT_DIR/scripts/smoke-prod.sh"
+fi
+
+if (( BACKEND_REPLICAS > 1 )) && [[ "$SKIP_REPLICA_SMOKE" != "true" ]]; then
+  ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" \
+    BIZMETRICS_REPLICA_SMOKE_EXPECTED_REPLICAS="$BACKEND_REPLICAS" \
+    "$ROOT_DIR/scripts/replica-smoke.sh"
+fi
+
+if [[ "$RUN_CONCURRENCY_SMOKE" == "true" ]]; then
+  ENV_FILE="$ENV_FILE" BIZMETRICS_LOAD_MODE=read "$ROOT_DIR/scripts/concurrency-smoke.sh"
+fi
+
+echo "Deployment completed"

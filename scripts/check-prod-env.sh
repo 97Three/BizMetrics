@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env.production}"
+COMPOSE_FILE="${COMPOSE_FILE:-$ROOT_DIR/docker-compose.prod.yml}"
+errors=()
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "Missing env file: $ENV_FILE" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+
+value_of() {
+  local name="$1"
+  printf '%s' "${!name:-}"
+}
+
+fail() {
+  errors+=("$1")
+}
+
+contains_placeholder() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -z "$value" || "$value" == *"replace-with"* || "$value" == *"example.com"* || "$value" == "123456" || "$value" == "bizmetrics" || "$value" == "minioadmin" ]]
+}
+
+require_real_value() {
+  local name="$1"
+  local min_length="${2:-1}"
+  local value
+  value="$(value_of "$name")"
+  if contains_placeholder "$value" || (( ${#value} < min_length )); then
+    fail "$name must be replaced with a production value of at least $min_length characters"
+  fi
+}
+
+require_equals() {
+  local name="$1"
+  local expected="$2"
+  local value
+  value="$(value_of "$name")"
+  if [[ "$value" != "$expected" ]]; then
+    fail "$name must be $expected"
+  fi
+}
+
+require_https_url() {
+  local name="$1"
+  local value
+  value="$(value_of "$name")"
+  if contains_placeholder "$value" || [[ "$value" != https://* ]]; then
+    fail "$name must be a production https:// URL"
+  fi
+}
+
+require_https_origin() {
+  local name="$1"
+  local value authority
+  value="$(value_of "$name")"
+  authority="${value#https://}"
+  authority="${authority%/}"
+  if contains_placeholder "$value" \
+    || [[ "$value" != https://* ]] \
+    || [[ -z "$authority" ]] \
+    || [[ "$authority" == *"/"* || "$authority" == *"?"* || "$authority" == *"#"* || "$authority" == *"@"* ]]; then
+    fail "$name must be a production https:// origin without a path, query, fragment, or user info"
+  fi
+}
+
+require_no_latest() {
+  local name="$1"
+  local value
+  value="$(value_of "$name")"
+  if [[ -z "$value" || "$value" == *":latest" || "$value" == "latest" ]]; then
+    fail "$name must pin an explicit version, not latest"
+  fi
+}
+
+require_real_value BIZMETRICS_PUBLIC_HOST 4
+require_real_value BIZMETRICS_TLS_EMAIL 6
+require_real_value BIZMETRICS_POSTGRES_PASSWORD 16
+require_real_value BIZMETRICS_BOOTSTRAP_ADMIN_EMAIL 6
+require_real_value BIZMETRICS_BOOTSTRAP_ADMIN_PASSWORD 12
+require_real_value BIZMETRICS_BOOTSTRAP_COMPANY_NAME 2
+require_real_value BIZMETRICS_MINIO_ACCESS_KEY 12
+require_real_value BIZMETRICS_MINIO_SECRET_KEY 16
+require_real_value BIZMETRICS_SMOKE_EMAIL 6
+require_real_value BIZMETRICS_SMOKE_PASSWORD 12
+
+require_equals BIZMETRICS_RUNTIME_ENVIRONMENT production
+require_equals BIZMETRICS_BOOTSTRAP_MODE bootstrap
+require_equals BIZMETRICS_REGISTRATION_MODE invite
+require_equals BIZMETRICS_PASSWORD_REQUIRE_COMPLEXITY true
+require_equals BIZMETRICS_FLYWAY_ENABLED true
+require_equals BIZMETRICS_OUTBOX_ENABLED true
+require_equals BIZMETRICS_OUTBOX_CONSUMER_ENABLED true
+require_equals BIZMETRICS_OBJECT_STORAGE_ENABLED true
+require_equals BIZMETRICS_RECEIPT_STORAGE_AUDIT_ENABLED true
+
+require_https_url BIZMETRICS_PUBLIC_API_BASE_URL
+require_https_origin BIZMETRICS_MINIO_EXTERNAL_URL
+
+require_no_latest BIZMETRICS_CADDY_VERSION
+require_no_latest BIZMETRICS_MINIO_VERSION
+require_no_latest BIZMETRICS_PROMETHEUS_VERSION
+require_no_latest BIZMETRICS_BACKUP_HELPER_IMAGE
+
+if [[ -z "${BIZMETRICS_ALLOWED_ORIGINS:-}" ]]; then
+  fail "BIZMETRICS_ALLOWED_ORIGINS must not be empty"
+else
+  IFS=',' read -r -a allowed_origins <<< "$BIZMETRICS_ALLOWED_ORIGINS"
+  for origin in "${allowed_origins[@]}"; do
+    origin="${origin#"${origin%%[![:space:]]*}"}"
+    origin="${origin%"${origin##*[![:space:]]}"}"
+    if [[ "$origin" != https://* || "$origin" == *"localhost"* || "$origin" == *"127.0.0.1"* || "$origin" == *"example.com"* || "$origin" == *"*"* ]]; then
+      fail "BIZMETRICS_ALLOWED_ORIGINS contains a non-production origin: $origin"
+    fi
+  done
+fi
+
+if ! [[ "${BIZMETRICS_PASSWORD_MIN_LENGTH:-0}" =~ ^[0-9]+$ ]] || (( BIZMETRICS_PASSWORD_MIN_LENGTH < 12 )); then
+  fail "BIZMETRICS_PASSWORD_MIN_LENGTH must be at least 12"
+fi
+
+db_pool_max="${BIZMETRICS_DB_POOL_MAX_SIZE:-20}"
+db_pool_min="${BIZMETRICS_DB_POOL_MIN_IDLE:-4}"
+db_pool_connection_timeout="${BIZMETRICS_DB_POOL_CONNECTION_TIMEOUT_MS:-5000}"
+db_pool_validation_timeout="${BIZMETRICS_DB_POOL_VALIDATION_TIMEOUT_MS:-2000}"
+http_max_threads="${BIZMETRICS_HTTP_MAX_THREADS:-100}"
+http_min_spare_threads="${BIZMETRICS_HTTP_MIN_SPARE_THREADS:-10}"
+http_max_connections="${BIZMETRICS_HTTP_MAX_CONNECTIONS:-4096}"
+backend_replicas="${BIZMETRICS_BACKEND_REPLICAS:-1}"
+receipt_storage_max_bytes="${BIZMETRICS_RECEIPT_STORAGE_MAX_BYTES_PER_COMPANY:-10737418240}"
+receipt_storage_warning_percent="${BIZMETRICS_RECEIPT_STORAGE_WARNING_PERCENT:-80}"
+receipt_storage_audit_poll_delay="${BIZMETRICS_RECEIPT_STORAGE_AUDIT_POLL_DELAY_MS:-60000}"
+receipt_storage_audit_cadence="${BIZMETRICS_RECEIPT_STORAGE_AUDIT_CADENCE_MS:-21600000}"
+receipt_storage_audit_lease="${BIZMETRICS_RECEIPT_STORAGE_AUDIT_LEASE_MS:-1800000}"
+receipt_storage_audit_max_objects="${BIZMETRICS_RECEIPT_STORAGE_AUDIT_MAX_OBJECTS:-100000}"
+receipt_storage_audit_orphan_grace="${BIZMETRICS_RECEIPT_STORAGE_AUDIT_ORPHAN_GRACE_MS:-3600000}"
+receipt_storage_audit_sample_size="${BIZMETRICS_RECEIPT_STORAGE_AUDIT_SAMPLE_SIZE:-10}"
+
+if ! [[ "$backend_replicas" =~ ^[1-9][0-9]*$ ]]; then
+  fail "BIZMETRICS_BACKEND_REPLICAS must be a positive integer"
+fi
+
+if ! [[ "$receipt_storage_max_bytes" =~ ^[1-9][0-9]*$ ]]; then
+  fail "BIZMETRICS_RECEIPT_STORAGE_MAX_BYTES_PER_COMPANY must be a positive integer"
+fi
+if ! [[ "$receipt_storage_warning_percent" =~ ^([1-9]|[1-9][0-9])$ ]]; then
+  fail "BIZMETRICS_RECEIPT_STORAGE_WARNING_PERCENT must be between 1 and 99"
+fi
+for audit_duration in \
+  "$receipt_storage_audit_poll_delay" \
+  "$receipt_storage_audit_cadence" \
+  "$receipt_storage_audit_lease" \
+  "$receipt_storage_audit_orphan_grace"; do
+  if ! [[ "$audit_duration" =~ ^[1-9][0-9]*$ ]]; then
+    fail "Receipt storage audit durations must be integers of at least 60000 milliseconds"
+    break
+  fi
+  if (( audit_duration < 60000 )); then
+    fail "Receipt storage audit durations must be integers of at least 60000 milliseconds"
+    break
+  fi
+done
+if ! [[ "$receipt_storage_audit_max_objects" =~ ^[1-9][0-9]*$ ]]; then
+  fail "BIZMETRICS_RECEIPT_STORAGE_AUDIT_MAX_OBJECTS must be between 1 and 1000000"
+elif (( receipt_storage_audit_max_objects > 1000000 )); then
+  fail "BIZMETRICS_RECEIPT_STORAGE_AUDIT_MAX_OBJECTS must be between 1 and 1000000"
+fi
+if ! [[ "$receipt_storage_audit_sample_size" =~ ^[1-9][0-9]*$ ]]; then
+  fail "BIZMETRICS_RECEIPT_STORAGE_AUDIT_SAMPLE_SIZE must be between 1 and 100"
+elif (( receipt_storage_audit_sample_size > 100 )); then
+  fail "BIZMETRICS_RECEIPT_STORAGE_AUDIT_SAMPLE_SIZE must be between 1 and 100"
+fi
+
+if ! [[ "$db_pool_max" =~ ^[1-9][0-9]*$ ]]; then
+  fail "BIZMETRICS_DB_POOL_MAX_SIZE must be a positive integer"
+fi
+if ! [[ "$db_pool_min" =~ ^(0|[1-9][0-9]*)$ ]]; then
+  fail "BIZMETRICS_DB_POOL_MIN_IDLE must be a non-negative integer"
+fi
+if [[ "$db_pool_max" =~ ^[1-9][0-9]*$ && "$db_pool_min" =~ ^(0|[1-9][0-9]*)$ ]] && (( db_pool_min > db_pool_max )); then
+  fail "BIZMETRICS_DB_POOL_MIN_IDLE must not exceed BIZMETRICS_DB_POOL_MAX_SIZE"
+fi
+if ! [[ "$db_pool_connection_timeout" =~ ^[1-9][0-9]*$ ]]; then
+  fail "BIZMETRICS_DB_POOL_CONNECTION_TIMEOUT_MS must be a positive integer"
+fi
+if ! [[ "$db_pool_validation_timeout" =~ ^[1-9][0-9]*$ ]]; then
+  fail "BIZMETRICS_DB_POOL_VALIDATION_TIMEOUT_MS must be a positive integer"
+fi
+if [[ "$db_pool_connection_timeout" =~ ^[1-9][0-9]*$ && "$db_pool_validation_timeout" =~ ^[1-9][0-9]*$ ]] \
+  && (( db_pool_validation_timeout >= db_pool_connection_timeout )); then
+  fail "BIZMETRICS_DB_POOL_VALIDATION_TIMEOUT_MS must be lower than BIZMETRICS_DB_POOL_CONNECTION_TIMEOUT_MS"
+fi
+if ! [[ "$http_max_threads" =~ ^[1-9][0-9]*$ ]]; then
+  fail "BIZMETRICS_HTTP_MAX_THREADS must be a positive integer"
+fi
+if ! [[ "$http_min_spare_threads" =~ ^(0|[1-9][0-9]*)$ ]]; then
+  fail "BIZMETRICS_HTTP_MIN_SPARE_THREADS must be a non-negative integer"
+fi
+if [[ "$http_max_threads" =~ ^[1-9][0-9]*$ && "$http_min_spare_threads" =~ ^(0|[1-9][0-9]*)$ ]] \
+  && (( http_min_spare_threads > http_max_threads )); then
+  fail "BIZMETRICS_HTTP_MIN_SPARE_THREADS must not exceed BIZMETRICS_HTTP_MAX_THREADS"
+fi
+if ! [[ "$http_max_connections" =~ ^[1-9][0-9]*$ ]]; then
+  fail "BIZMETRICS_HTTP_MAX_CONNECTIONS must be a positive integer"
+elif [[ "$http_max_threads" =~ ^[1-9][0-9]*$ ]] && (( http_max_connections < http_max_threads )); then
+  fail "BIZMETRICS_HTTP_MAX_CONNECTIONS must not be lower than BIZMETRICS_HTTP_MAX_THREADS"
+fi
+
+if (( ${#errors[@]} > 0 )); then
+  printf 'Production environment check failed:\n' >&2
+  printf ' - %s\n' "${errors[@]}" >&2
+  exit 1
+fi
+
+docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" config >/dev/null
+echo "Production environment check passed"
