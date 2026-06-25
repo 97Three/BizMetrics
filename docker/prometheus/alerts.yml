@@ -1,0 +1,94 @@
+groups:
+  - name: bizmetrics.production
+    rules:
+      - alert: BizMetricsBackendDown
+        expr: up{job="bizmetrics-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: BizMetrics backend metrics scrape is down
+          description: Prometheus cannot scrape backend /actuator/prometheus for more than 2 minutes.
+
+      - alert: BizMetricsHighHttp5xxRate
+        expr: sum(rate(http_server_requests_seconds_count{job="bizmetrics-backend",status=~"5.."}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: BizMetrics backend 5xx responses are rising
+          description: Backend 5xx responses have stayed above 0.05 requests per second for 5 minutes.
+
+      - alert: BizMetricsHighHeapUsage
+        expr: sum(jvm_memory_used_bytes{job="bizmetrics-backend",area="heap"}) / sum(jvm_memory_max_bytes{job="bizmetrics-backend",area="heap"}) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: BizMetrics backend heap usage is high
+          description: JVM heap usage has stayed above 90% for 10 minutes.
+
+      - alert: BizMetricsDatabasePoolPendingConnections
+        expr: max(hikaricp_connections_pending{job="bizmetrics-backend"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: BizMetrics database pool has pending connections
+          description: HikariCP has had pending database connections for more than 5 minutes.
+
+      - alert: BizMetricsReceiptStorageCapacityWarning
+        expr: increase(bizmetrics_receipt_storage_capacity_warnings_total{job="bizmetrics-backend"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A company receipt storage allocation reached its warning level
+          description: At least one receipt upload crossed the configured company storage warning level in the last 15 minutes.
+
+      - alert: BizMetricsReceiptStorageQuotaRejected
+        expr: increase(bizmetrics_receipt_storage_capacity_rejections_total{job="bizmetrics-backend"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A receipt upload was rejected by company storage quota
+          description: At least one receipt upload exceeded the configured company storage maximum in the last 15 minutes.
+
+      - alert: BizMetricsReceiptStorageCompensationFailed
+        expr: increase(bizmetrics_receipt_storage_compensation_total{job="bizmetrics-backend",outcome="failure"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: An unreferenced receipt object could not be removed
+          description: Inspect backend logs for the bucket and object key, then reconcile the unreferenced MinIO object manually.
+
+      - alert: BizMetricsReceiptStorageAuditFailed
+        expr: increase(bizmetrics_receipt_storage_audit_runs_total{job="bizmetrics-backend",outcome="failure"}[7h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: The receipt storage integrity audit failed
+          description: Inspect backend logs and verify PostgreSQL and MinIO connectivity before the next six-hour audit.
+
+      - alert: BizMetricsReceiptStorageOrphanCandidates
+        expr: increase(bizmetrics_receipt_storage_audit_findings_total{job="bizmetrics-backend",type="orphan"}[7h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Unreferenced receipt objects need investigation
+          description: The read-only audit found objects older than the grace period without durable receipt references; inspect log samples and do not delete automatically.
+
+      - alert: BizMetricsReceiptStorageMissingObjects
+        expr: increase(bizmetrics_receipt_storage_audit_findings_total{job="bizmetrics-backend",type="missing"}[7h]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Durable receipt references point to missing objects
+          description: Investigate possible receipt data loss immediately using the bounded object-key samples in backend logs.
+
+      - alert: BizMetricsReceiptStorageInvalidReferences
+        expr: increase(bizmetrics_receipt_storage_audit_findings_total{job="bizmetrics-backend",type=~"invalid_reference|duplicate_reference"}[7h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Receipt storage references need database reconciliation
+          description: The integrity audit found malformed or duplicate durable MinIO references; inspect backend logs and database records.
